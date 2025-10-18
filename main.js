@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI Selection → Poe API
 // @namespace    ai-quick-ask-poe
-// @version      2.3.0
+// @version      2.4.0
 // @description  Панель шаблонов с поддержкой всех возможностей Poe API
 // @author       you
 // @match        *://*/*
@@ -20,7 +20,14 @@
   "use strict";
 
   const CFG_KEY = "aqp_config_v2";
-  const CONFIG_VERSION = 4; // Увеличиваем при изменении структуры
+  const CONFIG_VERSION = 4;
+
+  // Константы для повторяющихся значений
+  const MAX_Z_INDEX = 2147483647;
+  const PANEL_MIN_WIDTH = 300;
+  const PANEL_MIN_HEIGHT = 150;
+  const MAX_RETRY_ATTEMPTS = 2;
+  const REQUEST_TIMEOUT = 120000;
 
   const DEFAULTS = {
     version: CONFIG_VERSION,
@@ -127,7 +134,7 @@
     retryCount: 0,
     dragState: null,
     resizeState: null,
-    zIndexCounter: 2147483647 // Счётчик для z-index окон
+    zIndexCounter: MAX_Z_INDEX
   };
 
   function loadConfig() {
@@ -162,6 +169,61 @@
     GM_setValue(CFG_KEY, JSON.stringify(config));
   }
 
+  function exportConfig() {
+    const dataStr = JSON.stringify(config, null, 2);
+    const blob = new Blob([dataStr], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    
+    const now = new Date();
+    const timestamp = now.toISOString().slice(0, 19).replace(/:/g, "-").replace("T", "_");
+    const filename = `aqp_config_backup_${timestamp}.json`;
+    
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function importConfig() {
+    const input = document.createElement("input");
+    input.type = "file";
+    input.accept = "application/json";
+    
+    input.onchange = (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const imported = JSON.parse(ev.target.result);
+          
+          if (!imported.baseUrl || !imported.templates) {
+            alert("❌ Неверный формат файла конфигурации");
+            return;
+          }
+          
+          config = {
+            ...DEFAULTS,
+            ...imported,
+            version: CONFIG_VERSION
+          };
+          
+          saveConfig();
+          alert("✓ Настройки импортированы! Перезагрузите страницу для применения.");
+        } catch (err) {
+          alert("❌ Ошибка чтения файла: " + err.message);
+        }
+      };
+      reader.readAsText(file);
+    };
+    
+    input.click();
+  }
+
   function formatPrice(model) {
     const price = POE_PRICING[model];
     if (!price) return "";
@@ -178,6 +240,8 @@
       if (k === "class") e.className = v;
       else if (k === "style") Object.assign(e.style, v);
       else if (k.startsWith("on")) e.addEventListener(k.slice(2).toLowerCase(), v);
+      else if (k === "checked" || k === "disabled" || k === "selected") e[k] = v;
+      else if (k === "value") e.value = v;
       else e.setAttribute(k, v);
     });
     children.forEach(ch => e.appendChild(typeof ch === "string" ? document.createTextNode(ch) : ch));
@@ -202,16 +266,21 @@
       position: fixed; z-index: 2147483648 !important; background: #1a1a1a !important; color: #f0f0f0 !important;
       padding: 8px 10px; border-radius: 10px; display: flex; gap: 6px; flex-wrap: wrap;
       box-shadow: 0 4px 16px rgba(0,0,0,.35) !important; font: 12px system-ui;
-      border: 1px solid #333 !important;
+      border: 1px solid #333 !important; align-items: center;
     }
     .aqp-bubble button {
       background: #f0f0f0 !important; color: #1a1a1a !important; border: none; padding: 6px 10px;
       border-radius: 6px; cursor: pointer; font: 12px system-ui; font-weight: 500;
     }
     .aqp-bubble button:hover { background: #fff !important; }
+    .aqp-bubble button.settings-btn {
+      background: transparent !important; border: 1px solid #666 !important; color: #f0f0f0 !important;
+      padding: 4px 8px; font-size: 14px; margin-left: 6px;
+    }
+    .aqp-bubble button.settings-btn:hover { background: #333 !important; border-color: #999 !important; }
 
     .aqp-mini {
-      position: fixed; z-index: 2147483647; min-width: 300px; max-width: 90vw; min-height: 150px;
+      position: fixed; z-index: ${MAX_Z_INDEX}; min-width: ${PANEL_MIN_WIDTH}px; max-width: 90vw; min-height: ${PANEL_MIN_HEIGHT}px;
       background: #fff !important; border: 1px solid #ccc; border-radius: 10px;
       box-shadow: 0 8px 24px rgba(0,0,0,.25) !important; overflow: hidden;
       display: flex; flex-direction: column;
@@ -253,7 +322,7 @@
 
     .aqp-modal {
       position: fixed; inset: 0; background: rgba(0,0,0,.6) !important;
-      z-index: 2147483647; display: flex; align-items: center; justify-content: center;
+      z-index: ${MAX_Z_INDEX}; display: flex; align-items: center; justify-content: center;
     }
     .aqp-box {
       background: #fff !important; border-radius: 10px; width: 750px; max-width: 95vw;
@@ -352,6 +421,14 @@
         }
       }, tpl.name));
     });
+
+    state.bubble.appendChild(el("button", {
+      class: "settings-btn",
+      onClick: () => {
+        openSettings();
+        hideBubble();
+      }
+    }, "⚙"));
 
     const pt = getAnchorPoint();
     const offX = config.popupOffset?.x ?? -45;
@@ -474,7 +551,7 @@
     const newLeft = state.dragState.panelLeft + dx;
     const newTop = state.dragState.panelTop + dy;
 
-    state.dragState.panel.style.left = clamp(newLeft, 0, window.innerWidth - 300) + "px";
+    state.dragState.panel.style.left = clamp(newLeft, 0, window.innerWidth - PANEL_MIN_WIDTH) + "px";
     state.dragState.panel.style.top = clamp(newTop, 0, window.innerHeight - 100) + "px";
   }
 
@@ -523,8 +600,8 @@
     if (dir.includes("t")) { newHeight = startHeight - dy; newTop = startTop + dy; }
 
     // Ограничиваем размеры
-    newWidth = clamp(newWidth, 300, window.innerWidth * 0.9);
-    newHeight = clamp(newHeight, 150, window.innerHeight * 0.9);
+    newWidth = clamp(newWidth, PANEL_MIN_WIDTH, window.innerWidth * 0.9);
+    newHeight = clamp(newHeight, PANEL_MIN_HEIGHT, window.innerHeight * 0.9);
 
     // Корректируем позицию при изменении с левой/верхней стороны
     if (dir.includes("l")) newLeft = startLeft + (startWidth - newWidth);
@@ -620,10 +697,10 @@
         },
         onerror: () => {
           state.requestInProgress = false;
-          if (state.retryCount < 2) {
+          if (state.retryCount < MAX_RETRY_ATTEMPTS) {
             state.retryCount++;
             setTimeout(() => {
-              updateMini(panel, `\n\n⏳ Повтор попытки ${state.retryCount}/3...`, false);
+              updateMini(panel, `\n\n⏳ Повтор попытки ${state.retryCount}/${MAX_RETRY_ATTEMPTS + 1}...`, false);
               makeRequest();
             }, 1000 * state.retryCount);
           } else {
@@ -634,7 +711,7 @@
           state.requestInProgress = false;
           onError("Таймаут запроса (> 2 мин)");
         },
-        timeout: 120000
+        timeout: REQUEST_TIMEOUT
       });
     };
 
@@ -651,12 +728,9 @@
     // Дополнительные параметры для Poe API
     const extraParams = {};
 
-    // Web Search (для поддерживаемых моделей)
+    // ИСПРАВЛЕНО: убрано лишнее вложение web_search: { enabled: true }
     if (tpl.webSearch && WEB_SEARCH_MODELS.includes(model)) {
-      extraParams.tools = [{
-        type: "web_search",
-        web_search: { enabled: true }
-      }];
+      extraParams.tools = [{ type: "web_search" }];
     }
 
     // Reasoning effort (для поддерживаемых моделей)
@@ -739,7 +813,15 @@
       )
     ));
 
-    // Templates
+    body.appendChild(el("div", { class: "aqp-section" },
+      el("div", { class: "aqp-section-title" }, "Резервное копирование"),
+      el("div", { class: "aqp-row" },
+        el("button", { class: "aqp-btn", onClick: exportConfig }, "📥 Экспорт настроек"),
+        el("button", { class: "aqp-btn sec", onClick: importConfig }, "📤 Импорт настроек")
+      ),
+      el("div", { class: "aqp-info" }, "Экспорт сохранит все настройки в JSON файл. Импорт восстановит настройки из файла.")
+    ));
+
     const tplSection = el("div", { class: "aqp-section" },
       el("div", { class: "aqp-section-title" }, "Шаблоны"),
       el("div", { id: "tpl-list" }),
@@ -860,8 +942,8 @@
         y: parseInt(document.getElementById("f-offy").value, 10) || 45
       };
       config.defaultWindowSize = {
-        width: clamp(parseInt(document.getElementById("f-winw").value, 10) || 400, 300, 2000),
-        height: clamp(parseInt(document.getElementById("f-winh").value, 10) || 400, 150, 2000)
+        width: clamp(parseInt(document.getElementById("f-winw").value, 10) || 400, PANEL_MIN_WIDTH, 2000),
+        height: clamp(parseInt(document.getElementById("f-winh").value, 10) || 400, PANEL_MIN_HEIGHT, 2000)
       };
 
       saveConfig();
