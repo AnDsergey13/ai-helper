@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI Selection → Poe API
 // @namespace    ai-quick-ask-poe
-// @version      1.5.0
+// @version      2.0.0
 // @description  Панель шаблонов с поддержкой всех возможностей Poe API
 // @author       you
 // @match        *://*/*
@@ -26,22 +26,22 @@
     defaultModel: "Claude-Sonnet-4",
     apiKey: "",
     autoPopup: true,
-    useStream: true,
+    showModelSelector: false,
     popupOffset: { x: 14, y: 12 },
     templates: [
       {
-        id: "explain",
-        name: "Пояснить",
-        model: "",
-        prompt: "Объясни простыми словами:\n\n{{selection}}",
+        id: "what",
+        name: "What?",
+        model: "GPT-4o",
+        prompt: "Объясни тезисно и простыми словами, что это такое?:\n\n{{selection}}",
         webSearch: false,
         reasoningEffort: "none"
       },
       {
-        id: "tldr",
-        name: "TL;DR",
-        model: "",
-        prompt: "Краткое резюме:\n\n{{selection}}",
+        id: "sum",
+        name: "SUM",
+        model: "GPT-5",
+        prompt: "**РОЛЬ:**\n\nТы — высококвалифицированный аналитик-редактор, специализирующийся на создании **экстрактивных и абстрактивных резюме** для академических и деловых текстов. Твоя главная задача — обеспечить **нулевую потерю критически важных деталей и скрытых нюансов** из исходного текста.\n\n\n\n**МЕТОДОЛОГИЯ (Chain-of-Thought):**\n\nПрежде чем начать суммаризацию, выполни следующие шаги:\n\n1. **Идентификация ключевых сущностей:** Составь внутренний список всех имен, дат, статистических данных, уникальных терминов и ключевых концепций.\n\n2. **Определение основной идеи и подтем:** Разбей текст на логические блоки и определи основную мысль каждого блока, включая любые противоречия или тонкие оговорки автора.\n\n3. **Формулировка тезисов:** Сформулируй 5-7 основных тезисов, которые, будучи объединенными, полностью передают суть и все важные детали текста.\n\n4. **Проверка на нюансы:** Убедись, что резюме отражает тон голоса (например, скептический, восторженный, нейтральный) и любые 'скрытые' предположения или оговорки, сделанные автором.\n\n\n\n**ТРЕБОВАНИЯ К ВЫВОДУ:**\n\n1. **Формат:** Резюме должно быть представлено в виде **экстрактивной (выбирающей фразы из оригинала) и абстрактивной (перефразирующей) комбинации** объемом **не более 500 слов**.\n\n2. **Точность:** Каждое утверждение в резюме должно быть **фактически подтверждено** исходным текстом.\n\n3. **Детализация:** Включи в резюме **все** ключевые статистические данные, имена и даты, упомянутые в тексте, чтобы избежать потери деталей.\n\n4. **Язык:** Резюме должно быть написано на русском профессиональным, академическим тоном.\n\n\n\n**ИСХОДНЫЙ ТЕКСТ ДЛЯ АНАЛИЗА:**\n\n---\n\n{{selection}}\n\n---\n\n",
         webSearch: false,
         reasoningEffort: "none"
       }
@@ -69,6 +69,28 @@
     "DeepSeek-R1",
     "Qwen3-72B"
   ];
+
+  // Цены моделей (USD за 1M токенов: input / output)
+  const POE_PRICING = {
+    "Claude-Sonnet-4.5": { in: 3.0, out: 15.0 },
+    "Claude-Sonnet-4": { in: 3.0, out: 15.0 },
+    "Claude-Opus-4.1": { in: 15.0, out: 75.0 },
+    "Claude-Haiku-4.5": { in: 0.8, out: 4.0 },
+    "GPT-5": { in: 10.0, out: 30.0 },
+    "GPT-5-Codex": { in: 10.0, out: 30.0 },
+    "ChatGPT-5": { in: 5.0, out: 15.0 },
+    "GPT-4.1": { in: 10.0, out: 30.0 },
+    "GPT-4o": { in: 2.5, out: 10.0 },
+    "Gemini-2.5-Pro": { in: 1.25, out: 5.0 },
+    "Gemini-2.5-Flash": { in: 0.075, out: 0.3 },
+    "Gemini-2.0-Flash": { in: 0.0, out: 0.0 },
+    "Grok-4": { in: 5.0, out: 15.0 },
+    "Grok-3": { in: 2.0, out: 10.0 },
+    "Llama-3.1-405B": { in: 2.0, out: 2.0 },
+    "Llama-3.3-70B": { in: 0.6, out: 0.6 },
+    "DeepSeek-R1": { in: 0.55, out: 2.19 },
+    "Qwen3-72B": { in: 0.4, out: 0.4 }
+  };
 
   // Модели с поддержкой reasoning (по документации Poe)
   const REASONING_MODELS = [
@@ -103,7 +125,8 @@
     bubble: null,
     miniPanel: null,
     requestInProgress: false,
-    retryCount: 0
+    retryCount: 0,
+    dragState: null
   };
 
   function loadConfig() {
@@ -115,7 +138,8 @@
       return {
         ...DEFAULTS,
         ...parsed,
-        popupOffset: { ...DEFAULTS.popupOffset, ...parsed.popupOffset }
+        popupOffset: { ...DEFAULTS.popupOffset, ...parsed.popupOffset },
+        showModelSelector: parsed.showModelSelector ?? DEFAULTS.showModelSelector
       };
     } catch {
       return JSON.parse(JSON.stringify(DEFAULTS));
@@ -124,6 +148,14 @@
 
   function saveConfig() {
     GM_setValue(CFG_KEY, JSON.stringify(config));
+  }
+
+  function formatPrice(model) {
+    const price = POE_PRICING[model];
+    if (!price) return "";
+    if (price.in === 0 && price.out === 0) return " 🆓";
+    const avg = (price.in + price.out) / 2;
+    return ` $${avg.toFixed(2)}/1M`;
   }
 
   const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
@@ -143,23 +175,17 @@
   const isOurUI = (node) => {
     let el = node?.nodeType === 1 ? node : node?.parentElement;
     while (el) {
-      if (el.classList?.contains("aqp-ui")) return true;
+      // Разрешаем выделение в body окна ответа
+      if (el.id === "aqp-mini-body") return false;
+      // Блокируем только для bubble и других UI элементов
+      if (el.classList?.contains("aqp-bubble")) return true;
       el = el.parentElement;
     }
     return false;
   };
 
-  // Улучшенные стили с учетом Dark Reader
+  // Улучшенные стили
   GM_addStyle(`
-    .aqp-gear {
-      position: fixed; right: 16px; bottom: 16px; width: 42px; height: 42px;
-      border-radius: 50%; background: #1a1a1a !important; color: #fff !important; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 4px 12px rgba(0,0,0,.4) !important; z-index: 2147483645;
-      font-size: 20px; user-select: none; border: 1px solid #333 !important;
-    }
-    .aqp-gear:hover { background: #2a2a2a !important; transform: scale(1.05); }
-
     .aqp-bubble {
       position: fixed; z-index: 2147483646; background: #1a1a1a !important; color: #f0f0f0 !important;
       padding: 8px 10px; border-radius: 10px; display: flex; gap: 6px; flex-wrap: wrap;
@@ -180,11 +206,13 @@
     .aqp-mini-header {
       display: flex; justify-content: space-between; align-items: center;
       padding: 10px 12px; background: #f5f5f5 !important; border-bottom: 1px solid #ddd;
-      font: 600 13px system-ui; color: #1a1a1a !important;
+      font: 600 13px system-ui; color: #1a1a1a !important; cursor: move;
+      user-select: none;
     }
     .aqp-mini-body {
       padding: 12px; max-height: 400px; overflow: auto;
       white-space: pre-wrap; font: 13px/1.5 system-ui; color: #1a1a1a !important;
+      user-select: text !important; cursor: text !important;
     }
     .aqp-mini button {
       background: #1a1a1a !important; color: #fff !important; border: none; padding: 5px 10px;
@@ -273,19 +301,24 @@
 
     state.bubble = el("div", { class: "aqp-bubble aqp-ui" });
 
-    // Добавляем выпадающий список моделей
-    const modelSelect = el("select", {
-      class: "aqp-select",
-      style: { width: "auto", padding: "4px 6px", fontSize: "11px", marginRight: "6px" }
-    });
-    modelSelect.appendChild(el("option", { value: "" }, "Модель"));
-    POE_MODELS.forEach(m => modelSelect.appendChild(el("option", { value: m }, m)));
-    state.bubble.appendChild(modelSelect);
+    // Добавляем выпадающий список моделей (только если включена опция)
+    let modelSelect = null;
+    if (config.showModelSelector) {
+      modelSelect = el("select", {
+        class: "aqp-select",
+        style: { width: "auto", padding: "4px 6px", fontSize: "11px", marginRight: "6px" }
+      });
+      modelSelect.appendChild(el("option", { value: "" }, "Модель по умолчанию"));
+      POE_MODELS.forEach(m => {
+        modelSelect.appendChild(el("option", { value: m }, m + formatPrice(m)));
+      });
+      state.bubble.appendChild(modelSelect);
+    }
 
     templates.forEach(tpl => {
       state.bubble.appendChild(el("button", {
         onClick: () => {
-          const selectedModel = modelSelect.value;
+          const selectedModel = modelSelect ? modelSelect.value : "";
           handleTemplate(tpl, selectedModel);
           hideBubble();
         }
@@ -313,21 +346,60 @@
   function openMini(title, text) {
     closeMini();
 
+    const header = el("div", { class: "aqp-mini-header" },
+      el("div", {}, title),
+      el("div", {},
+        el("button", { class: "sec", onClick: copyMini }, "Копировать"),
+        el("button", { class: "sec", onClick: closeMini }, "Закрыть")
+      )
+    );
+
     state.miniPanel = el("div", { class: "aqp-mini aqp-ui" },
-      el("div", { class: "aqp-mini-header" },
-        el("div", {}, title),
-        el("div", {},
-          el("button", { class: "sec", onClick: copyMini }, "Копировать"),
-          el("button", { class: "sec", onClick: closeMini }, "Закрыть")
-        )
-      ),
+      header,
       el("div", { class: "aqp-mini-body", id: "aqp-mini-body" }, text)
     );
+
+    // Добавляем drag & drop
+    header.addEventListener("mousedown", startDrag);
 
     const pt = getAnchorPoint();
     state.miniPanel.style.left = clamp(pt.x + 20, 10, window.innerWidth - 320) + "px";
     state.miniPanel.style.top = clamp(pt.y + 20, 10, window.innerHeight - 100) + "px";
     document.body.appendChild(state.miniPanel);
+  }
+
+  function startDrag(e) {
+    if (e.target.tagName === "BUTTON") return; // Не тащим, если кликнули на кнопку
+
+    state.dragState = {
+      startX: e.clientX,
+      startY: e.clientY,
+      panelLeft: parseInt(state.miniPanel.style.left) || 0,
+      panelTop: parseInt(state.miniPanel.style.top) || 0
+    };
+
+    document.addEventListener("mousemove", onDrag);
+    document.addEventListener("mouseup", stopDrag);
+    e.preventDefault();
+  }
+
+  function onDrag(e) {
+    if (!state.dragState) return;
+
+    const dx = e.clientX - state.dragState.startX;
+    const dy = e.clientY - state.dragState.startY;
+
+    const newLeft = state.dragState.panelLeft + dx;
+    const newTop = state.dragState.panelTop + dy;
+
+    state.miniPanel.style.left = clamp(newLeft, 0, window.innerWidth - 300) + "px";
+    state.miniPanel.style.top = clamp(newTop, 0, window.innerHeight - 100) + "px";
+  }
+
+  function stopDrag() {
+    state.dragState = null;
+    document.removeEventListener("mousemove", onDrag);
+    document.removeEventListener("mouseup", stopDrag);
   }
 
   function updateMini(text, replace) {
@@ -344,7 +416,7 @@
     if (body?.textContent) GM_setClipboard(body.textContent);
   }
 
-  function callAPI(model, prompt, extraParams, onChunk, onDone, onError) {
+  function callAPI(model, prompt, extraParams, onDone, onError) {
     if (state.requestInProgress) {
       onError("Предыдущий запрос ещё не завершён");
       return;
@@ -360,112 +432,48 @@
         { role: "system", content: "You are a helpful assistant." },
         { role: "user", content: prompt }
       ],
-      stream: config.useStream,
+      stream: false,
       ...extraParams
     };
 
     const makeRequest = () => {
-      if (config.useStream) {
-        let buffer = "";
-        let lastProcessedLength = 0;
-
-        GM_xmlhttpRequest({
-          method: "POST",
-          url: url,
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + config.apiKey
-          },
-          data: JSON.stringify(body),
-          onprogress: (res) => {
-            try {
-              const text = res.responseText || "";
-              if (text.length <= lastProcessedLength) return;
-
-              // Берём только новый кусок
-              const newChunk = text.slice(lastProcessedLength);
-              lastProcessedLength = text.length;
-              buffer += newChunk;
-
-              // Обрабатываем полные строки
-              const lines = buffer.split(/\n/);
-              buffer = lines.pop() || ""; // Последняя неполная строка остаётся в буфере
-
-              for (const line of lines) {
-                if (!line.trim() || !line.startsWith("data:")) continue;
-                const data = line.slice(5).trim();
-                if (!data || data === "[DONE]") continue;
-
-                try {
-                  const json = JSON.parse(data);
-                  const delta = json?.choices?.[0]?.delta?.content;
-                  if (delta) onChunk(delta);
-                } catch {}
-              }
-            } catch {}
-          },
-          onload: () => {
-            state.requestInProgress = false;
-            onDone();
-          },
-          onerror: () => {
-            state.requestInProgress = false;
-            if (state.retryCount < 2) {
-              state.retryCount++;
-              setTimeout(() => {
-                onError(`Ошибка сети (попытка ${state.retryCount}/3)`);
-                makeRequest();
-              }, 1000 * state.retryCount);
-            } else {
-              onError("Ошибка сети: проверьте подключение к интернету");
-            }
-          },
-          ontimeout: () => {
-            state.requestInProgress = false;
-            onError("Таймаут запроса (> 2 мин)");
-          },
-          timeout: 120000
-        });
-      } else {
-        GM_xmlhttpRequest({
-          method: "POST",
-          url: url,
-          headers: {
-            "Content-Type": "application/json",
-            "Authorization": "Bearer " + config.apiKey
-          },
-          data: JSON.stringify(body),
-          responseType: "json",
-          onload: (res) => {
-            state.requestInProgress = false;
-            if (res.status >= 200 && res.status < 300) {
-              const content = res.response?.choices?.[0]?.message?.content || "";
-              onChunk(content);
-              onDone();
-            } else {
-              const msg = res.response?.error?.message || `HTTP ${res.status}`;
-              onError(msg);
-            }
-          },
-          onerror: () => {
-            state.requestInProgress = false;
-            if (state.retryCount < 2) {
-              state.retryCount++;
-              setTimeout(() => {
-                onError(`Ошибка сети (попытка ${state.retryCount}/3)`);
-                makeRequest();
-              }, 1000 * state.retryCount);
-            } else {
-              onError("Ошибка сети: проверьте подключение к интернету");
-            }
-          },
-          ontimeout: () => {
-            state.requestInProgress = false;
-            onError("Таймаут запроса (> 2 мин)");
-          },
-          timeout: 120000
-        });
-      }
+      GM_xmlhttpRequest({
+        method: "POST",
+        url: url,
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + config.apiKey
+        },
+        data: JSON.stringify(body),
+        responseType: "json",
+        onload: (res) => {
+          state.requestInProgress = false;
+          if (res.status >= 200 && res.status < 300) {
+            const content = res.response?.choices?.[0]?.message?.content || "";
+            onDone(content);
+          } else {
+            const msg = res.response?.error?.message || `HTTP ${res.status}`;
+            onError(msg);
+          }
+        },
+        onerror: () => {
+          state.requestInProgress = false;
+          if (state.retryCount < 2) {
+            state.retryCount++;
+            setTimeout(() => {
+              updateMini(`\n\n⏳ Повтор попытки ${state.retryCount}/3...`, false);
+              makeRequest();
+            }, 1000 * state.retryCount);
+          } else {
+            onError("Ошибка сети: проверьте подключение к интернету");
+          }
+        },
+        ontimeout: () => {
+          state.requestInProgress = false;
+          onError("Таймаут запроса (> 2 мин)");
+        },
+        timeout: 120000
+      });
     };
 
     makeRequest();
@@ -494,18 +502,13 @@
       extraParams.reasoning_effort = tpl.reasoningEffort;
     }
 
-    openMini(tpl.name + " • " + model, "Отправка запроса...");
+    openMini(tpl.name + " • " + model, "⏳ Отправка запроса...");
 
-    let isFirst = true;
     callAPI(
       model,
       prompt,
       extraParams,
-      (chunk) => {
-        updateMini(chunk, isFirst);
-        if (isFirst) isFirst = false;
-      },
-      () => {},
+      (content) => updateMini(content, true),
       (err) => updateMini("\n\n❌ " + err, false)
     );
   }
@@ -539,7 +542,7 @@
         el("label", { class: "aqp-label" }, "Модель по умолчанию"),
         (() => {
           const s = el("select", { id: "f-model", class: "aqp-select" });
-          POE_MODELS.forEach(m => s.appendChild(el("option", { value: m }, m)));
+          POE_MODELS.forEach(m => s.appendChild(el("option", { value: m }, m + formatPrice(m))));
           s.value = config.defaultModel;
           return s;
         })()
@@ -549,8 +552,8 @@
         "Автопанель при выделении"
       ),
       el("label", { class: "aqp-checkbox" },
-        el("input", { id: "f-stream", type: "checkbox", checked: config.useStream }),
-        "Потоковый режим"
+        el("input", { id: "f-showmodel", type: "checkbox", checked: config.showModelSelector }),
+        "Показывать выбор модели в панели кнопок"
       ),
       el("div", { class: "aqp-row" },
         el("div", { class: "aqp-field", style: { flex: "1" } },
@@ -605,7 +608,7 @@
             (() => {
               const s = el("select", { class: "aqp-select", onInput: e => { t.model = e.target.value; renderTpl(); } });
               s.appendChild(el("option", { value: "" }, "(по умолчанию)"));
-              POE_MODELS.forEach(m => s.appendChild(el("option", { value: m }, m)));
+              POE_MODELS.forEach(m => s.appendChild(el("option", { value: m }, m + formatPrice(m))));
               s.value = t.model || "";
               return s;
             })()
@@ -680,7 +683,7 @@
       config.apiKey = document.getElementById("f-key").value.trim();
       config.defaultModel = document.getElementById("f-model").value.trim();
       config.autoPopup = document.getElementById("f-popup").checked;
-      config.useStream = document.getElementById("f-stream").checked;
+      config.showModelSelector = document.getElementById("f-showmodel").checked;
       config.popupOffset = {
         x: parseInt(document.getElementById("f-offx").value, 10) || 14,
         y: parseInt(document.getElementById("f-offy").value, 10) || 12
@@ -693,9 +696,6 @@
   }
 
   // Init
-  const gear = el("div", { class: "aqp-gear aqp-ui", onClick: openSettings }, "⚙");
-  document.body.appendChild(gear);
-
   document.addEventListener("mousemove", e => state.lastMouse = { x: e.clientX, y: e.clientY }, { passive: true });
 
   let selTimer;
