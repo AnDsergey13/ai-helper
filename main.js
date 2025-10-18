@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI Selection → Poe API
 // @namespace    ai-quick-ask-poe
-// @version      2.4.0
+// @version      2.5.0
 // @description  Панель шаблонов с поддержкой всех возможностей Poe API
 // @author       you
 // @match        *://*/*
@@ -20,7 +20,7 @@
   "use strict";
 
   const CFG_KEY = "aqp_config_v2";
-  const CONFIG_VERSION = 4;
+  const CONFIG_VERSION = 5;
 
   // Константы для повторяющихся значений
   const MAX_Z_INDEX = 2147483647;
@@ -28,6 +28,11 @@
   const PANEL_MIN_HEIGHT = 150;
   const MAX_RETRY_ATTEMPTS = 2;
   const REQUEST_TIMEOUT = 120000;
+  
+  // Константы безопасности
+  const MAX_IMPORT_SIZE = 1024 * 1024; // 1MB
+  const MAX_PROMPT_LENGTH = 100000; // 100K символов
+  const MAX_TEMPLATES = 50;
 
   const DEFAULTS = {
     version: CONFIG_VERSION,
@@ -78,25 +83,25 @@
     "DeepSeek-R1"
   ];
 
-  // Цены моделей (USD за 1M токенов: input / output)
+  // Актуальная стоимость в Poe points за 1 сообщение (октябрь 2025)
   const POE_PRICING = {
-    "Claude-Sonnet-4.5": { in: 3.0, out: 15.0 },
-    "Claude-Sonnet-4": { in: 3.0, out: 15.0 },
-    "Claude-Opus-4.1": { in: 15.0, out: 75.0 },
-    "Claude-Haiku-4.5": { in: 0.8, out: 4.0 },
-    "GPT-5": { in: 10.0, out: 30.0 },
-    "GPT-5-Codex": { in: 10.0, out: 30.0 },
-    "ChatGPT-5": { in: 5.0, out: 15.0 },
-    "GPT-4.1": { in: 10.0, out: 30.0 },
-    "GPT-4o": { in: 2.5, out: 10.0 },
-    "Gemini-2.5-Pro": { in: 1.25, out: 5.0 },
-    "Gemini-2.5-Flash": { in: 0.075, out: 0.3 },
-    "Gemini-2.0-Flash": { in: 0.0, out: 0.0 },
-    "Grok-4": { in: 5.0, out: 15.0 },
-    "Grok-3": { in: 2.0, out: 10.0 },
-    "Llama-3.1-405B": { in: 2.0, out: 2.0 },
-    "Llama-3.3-70B": { in: 0.6, out: 0.6 },
-    "DeepSeek-R1": { in: 0.55, out: 2.19 }
+    "Claude-Sonnet-4.5": 300,
+    "Claude-Sonnet-4": 200,
+    "Claude-Opus-4.1": 600,
+    "Claude-Haiku-4.5": 30,
+    "GPT-5": 800,
+    "GPT-5-Codex": 800,
+    "ChatGPT-5": 400,
+    "GPT-4.1": 800,
+    "GPT-4o": 150,
+    "Gemini-2.5-Pro": 100,
+    "Gemini-2.5-Flash": 10,
+    "Gemini-2.0-Flash": 0,
+    "Grok-4": 500,
+    "Grok-3": 200,
+    "Llama-3.1-405B": 150,
+    "Llama-3.3-70B": 80,
+    "DeepSeek-R1": 50
   };
 
   // Модели с поддержкой reasoning (по документации Poe)
@@ -169,6 +174,11 @@
     GM_setValue(CFG_KEY, JSON.stringify(config));
   }
 
+  function sanitizeFilename(name) {
+    // Безопасная санитизация имени файла
+    return name.replace(/[^a-zA-Z0-9_-]/g, '_');
+  }
+
   function exportConfig() {
     const dataStr = JSON.stringify(config, null, 2);
     const blob = new Blob([dataStr], { type: "application/json" });
@@ -176,7 +186,7 @@
     
     const now = new Date();
     const timestamp = now.toISOString().slice(0, 19).replace(/:/g, "-").replace("T", "_");
-    const filename = `aqp_config_backup_${timestamp}.json`;
+    const filename = sanitizeFilename(`aqp_config_backup_${timestamp}`) + ".json";
     
     const a = document.createElement("a");
     a.href = url;
@@ -196,14 +206,39 @@
       const file = e.target.files[0];
       if (!file) return;
       
+      // Проверка размера файла (DoS защита)
+      if (file.size > MAX_IMPORT_SIZE) {
+        alert(`❌ Файл слишком большой (макс ${MAX_IMPORT_SIZE / 1024 / 1024}MB)`);
+        return;
+      }
+      
       const reader = new FileReader();
       reader.onload = (ev) => {
         try {
           const imported = JSON.parse(ev.target.result);
           
-          if (!imported.baseUrl || !imported.templates) {
+          // Строгая валидация структуры
+          if (!imported.baseUrl || !Array.isArray(imported.templates)) {
             alert("❌ Неверный формат файла конфигурации");
             return;
+          }
+          
+          // Валидация количества шаблонов
+          if (imported.templates.length > MAX_TEMPLATES) {
+            alert(`❌ Слишком много шаблонов (макс ${MAX_TEMPLATES})`);
+            return;
+          }
+          
+          // Валидация каждого шаблона
+          for (const tpl of imported.templates) {
+            if (!tpl.name || !tpl.prompt) {
+              alert("❌ Некорректная структура шаблона");
+              return;
+            }
+            if (tpl.prompt.length > MAX_PROMPT_LENGTH) {
+              alert(`❌ Промпт слишком длинный (макс ${MAX_PROMPT_LENGTH} символов)`);
+              return;
+            }
           }
           
           config = {
@@ -225,11 +260,10 @@
   }
 
   function formatPrice(model) {
-    const price = POE_PRICING[model];
-    if (!price) return "";
-    if (price.in === 0 && price.out === 0) return " 🆓";
-    const avg = (price.in + price.out) / 2;
-    return ` $${avg.toFixed(2)}/1M`;
+    const points = POE_PRICING[model];
+    if (points === undefined) return "";
+    if (points === 0) return " FREE";
+    return ` ${points}⚡`;
   }
 
   const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
@@ -263,7 +297,7 @@
   // Улучшенные стили
   GM_addStyle(`
     .aqp-bubble {
-      position: fixed; z-index: 2147483648 !important; background: #1a1a1a !important; color: #f0f0f0 !important;
+      position: fixed; z-index: ${MAX_Z_INDEX + 1} !important; background: #1a1a1a !important; color: #f0f0f0 !important;
       padding: 8px 10px; border-radius: 10px; display: flex; gap: 6px; flex-wrap: wrap;
       box-shadow: 0 4px 16px rgba(0,0,0,.35) !important; font: 12px system-ui;
       border: 1px solid #333 !important; align-items: center;
@@ -322,7 +356,7 @@
 
     .aqp-modal {
       position: fixed; inset: 0; background: rgba(0,0,0,.6) !important;
-      z-index: ${MAX_Z_INDEX}; display: flex; align-items: center; justify-content: center;
+      z-index: ${MAX_Z_INDEX + 1}; display: flex; align-items: center; justify-content: center;
     }
     .aqp-box {
       background: #fff !important; border-radius: 10px; width: 750px; max-width: 95vw;
@@ -491,13 +525,30 @@
     bringToFront(miniPanel);
     miniPanel.addEventListener("mousedown", () => bringToFront(miniPanel));
 
-    header.addEventListener("mousedown", (e) => startDrag(e, miniPanel));
+    const dragHandler = (e) => startDrag(e, miniPanel);
+    header.addEventListener("mousedown", dragHandler);
+    
+    const resizeHandlers = [];
     miniPanel.querySelectorAll(".aqp-resize").forEach(handle => {
-      handle.addEventListener("mousedown", (e) => startResize(e, miniPanel));
+      const handler = (e) => startResize(e, miniPanel);
+      handle.addEventListener("mousedown", handler);
+      resizeHandlers.push({ handle, handler });
     });
 
-    copyBtn.addEventListener("click", () => copyMini(miniPanel, copyBtn));
-    closeBtn.addEventListener("click", () => closeMini(miniPanel));
+    const copyHandler = () => copyMini(miniPanel, copyBtn);
+    const closeHandler = () => {
+      // Очистка event listeners (memory leak fix)
+      header.removeEventListener("mousedown", dragHandler);
+      resizeHandlers.forEach(({ handle, handler }) => {
+        handle.removeEventListener("mousedown", handler);
+      });
+      copyBtn.removeEventListener("click", copyHandler);
+      closeBtn.removeEventListener("click", closeHandler);
+      closeMini(miniPanel);
+    };
+
+    copyBtn.addEventListener("click", copyHandler);
+    closeBtn.addEventListener("click", closeHandler);
 
     document.body.appendChild(miniPanel);
     state.miniPanels.push(miniPanel);
@@ -661,6 +712,12 @@
       return;
     }
 
+    // Валидация длины промпта
+    if (prompt.length > MAX_PROMPT_LENGTH) {
+      onError(`Промпт слишком длинный (макс ${MAX_PROMPT_LENGTH} символов)`);
+      return;
+    }
+
     state.requestInProgress = true;
     state.retryCount = 0;
 
@@ -722,15 +779,17 @@
     const selection = getSelection();
     if (!selection) return;
 
-    const prompt = tpl.prompt.replace(/\{\{selection\}\}/g, selection);
+    let prompt = tpl.prompt.replace(/\{\{selection\}\}/g, selection);
     const model = overrideModel || tpl.model || config.defaultModel;
 
     // Дополнительные параметры для Poe API
     const extraParams = {};
 
-    // ИСПРАВЛЕНО: убрано лишнее вложение web_search: { enabled: true }
+    // ИСПРАВЛЕНО: Web Search через модификацию системного промпта
+    // Это самый надёжный способ для Poe API
     if (tpl.webSearch && WEB_SEARCH_MODELS.includes(model)) {
-      extraParams.tools = [{ type: "web_search" }];
+      // Добавляем инструкцию в промпт вместо параметра API
+      prompt = "Search the web for the most recent and relevant information to help answer this query.\n\n" + prompt;
     }
 
     // Reasoning effort (для поддерживаемых моделей)
@@ -908,6 +967,11 @@
     }
 
     function addTpl() {
+      if (config.templates.length >= MAX_TEMPLATES) {
+        alert(`❌ Достигнут лимит шаблонов (макс ${MAX_TEMPLATES})`);
+        return;
+      }
+      
       config.templates.push({
         id: "t" + Date.now(),
         name: "Новый шаблон",
