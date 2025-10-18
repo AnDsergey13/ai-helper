@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI Selection → Poe API
 // @namespace    ai-quick-ask-poe
-// @version      2.1.0
+// @version      2.2.0
 // @description  Панель шаблонов с поддержкой всех возможностей Poe API
 // @author       you
 // @match        *://*/*
@@ -20,7 +20,7 @@
   "use strict";
 
   const CFG_KEY = "aqp_config_v2";
-  const CONFIG_VERSION = 2; // Увеличиваем при изменении структуры шаблонов
+  const CONFIG_VERSION = 3; // Увеличиваем при изменении структуры
 
   const DEFAULTS = {
     version: CONFIG_VERSION,
@@ -30,6 +30,7 @@
     autoPopup: true,
     showModelSelector: false,
     popupOffset: { x: 14, y: 12 },
+    defaultWindowSize: { width: 600, height: 400 },
     templates: [
       {
         id: "what",
@@ -125,7 +126,7 @@
   let state = {
     lastMouse: { x: 0, y: 0 },
     bubble: null,
-    miniPanel: null,
+    miniPanels: [], // Массив окон вместо одного
     requestInProgress: false,
     retryCount: 0,
     dragState: null,
@@ -151,6 +152,7 @@
         ...DEFAULTS,
         ...parsed,
         popupOffset: { ...DEFAULTS.popupOffset, ...parsed.popupOffset },
+        defaultWindowSize: { ...DEFAULTS.defaultWindowSize, ...parsed.defaultWindowSize },
         showModelSelector: parsed.showModelSelector ?? DEFAULTS.showModelSelector
       };
     } catch {
@@ -189,7 +191,7 @@
     let el = node?.nodeType === 1 ? node : node?.parentElement;
     while (el) {
       // Разрешаем выделение в body окна ответа
-      if (el.id === "aqp-mini-body") return false;
+      if (el.classList?.contains("aqp-mini-body")) return false;
       // Блокируем только для bubble и других UI элементов
       if (el.classList?.contains("aqp-bubble") || el.classList?.contains("aqp-mini")) return true;
       el = el.parentElement;
@@ -228,22 +230,29 @@
       white-space: pre-wrap; font: 13px/1.5 system-ui; color: #1a1a1a !important;
       user-select: text !important; cursor: text !important;
     }
-    .aqp-mini-resize {
-      position: absolute; bottom: 0; right: 0; width: 20px; height: 20px;
-      cursor: nwse-resize; display: flex; align-items: flex-end; justify-content: flex-end;
-      padding: 2px; opacity: 0.5;
+    
+    /* 8-сторонний resize */
+    .aqp-resize {
+      position: absolute; z-index: 10;
     }
-    .aqp-mini-resize:hover { opacity: 1; }
-    .aqp-mini-resize::after {
-      content: '⋱'; font-size: 16px; color: #999; line-height: 1;
-    }
+    .aqp-resize-t { top: 0; left: 0; right: 0; height: 6px; cursor: ns-resize; }
+    .aqp-resize-r { top: 0; right: 0; bottom: 0; width: 6px; cursor: ew-resize; }
+    .aqp-resize-b { bottom: 0; left: 0; right: 0; height: 6px; cursor: ns-resize; }
+    .aqp-resize-l { top: 0; left: 0; bottom: 0; width: 6px; cursor: ew-resize; }
+    .aqp-resize-tl { top: 0; left: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+    .aqp-resize-tr { top: 0; right: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+    .aqp-resize-bl { bottom: 0; left: 0; width: 12px; height: 12px; cursor: nesw-resize; }
+    .aqp-resize-br { bottom: 0; right: 0; width: 12px; height: 12px; cursor: nwse-resize; }
+
     .aqp-mini button {
       background: #1a1a1a !important; color: #fff !important; border: none; padding: 5px 10px;
       border-radius: 6px; cursor: pointer; font: 11px system-ui; margin-left: 6px;
+      transition: all 0.15s ease;
     }
     .aqp-mini button:hover { background: #2a2a2a !important; }
     .aqp-mini button.sec { background: #e0e0e0 !important; color: #1a1a1a !important; }
     .aqp-mini button.sec:hover { background: #d0d0d0 !important; }
+    .aqp-mini button.copied { background: #10b981 !important; }
 
     .aqp-modal {
       position: fixed; inset: 0; background: rgba(0,0,0,.6) !important;
@@ -367,65 +376,87 @@
   }
 
   function openMini(title, text) {
-    closeMini();
+    // НЕ закрываем предыдущие окна - накапливаем их
+
+    const copyBtn = el("button", { class: "sec copy-btn" }, "Копировать");
+    const closeBtn = el("button", { class: "sec" }, "Закрыть");
 
     const header = el("div", { class: "aqp-mini-header" },
       el("div", {}, title),
-      el("div", {},
-        el("button", { class: "sec", onClick: copyMini }, "Копировать"),
-        el("button", { class: "sec", onClick: closeMini }, "Закрыть")
-      )
+      el("div", {}, copyBtn, closeBtn)
     );
 
-    const resizeHandle = el("div", { class: "aqp-mini-resize" });
-
-    state.miniPanel = el("div", { class: "aqp-mini aqp-ui", style: { width: "600px", height: "400px" } },
+    const miniPanel = el("div", { class: "aqp-mini aqp-ui" },
       header,
-      el("div", { class: "aqp-mini-body", id: "aqp-mini-body" }, text),
-      resizeHandle
+      el("div", { class: "aqp-mini-body" }, text),
+      // 8 resize-ручек
+      el("div", { class: "aqp-resize aqp-resize-t", "data-dir": "t" }),
+      el("div", { class: "aqp-resize aqp-resize-r", "data-dir": "r" }),
+      el("div", { class: "aqp-resize aqp-resize-b", "data-dir": "b" }),
+      el("div", { class: "aqp-resize aqp-resize-l", "data-dir": "l" }),
+      el("div", { class: "aqp-resize aqp-resize-tl", "data-dir": "tl" }),
+      el("div", { class: "aqp-resize aqp-resize-tr", "data-dir": "tr" }),
+      el("div", { class: "aqp-resize aqp-resize-bl", "data-dir": "bl" }),
+      el("div", { class: "aqp-resize aqp-resize-br", "data-dir": "br" })
     );
 
-    // Добавляем drag & drop
-    header.addEventListener("mousedown", startDrag);
+    // Устанавливаем размер из конфига
+    miniPanel.style.width = config.defaultWindowSize.width + "px";
+    miniPanel.style.height = config.defaultWindowSize.height + "px";
 
-    // Добавляем resize
-    resizeHandle.addEventListener("mousedown", startResize);
+    // Центрируем окно с небольшим случайным смещением
+    const randomOffset = () => Math.floor(Math.random() * 60) - 30; // ±30px
+    const centerX = (window.innerWidth - config.defaultWindowSize.width) / 2 + randomOffset();
+    const centerY = (window.innerHeight - config.defaultWindowSize.height) / 2 + randomOffset();
 
-    const pt = getAnchorPoint();
-    state.miniPanel.style.left = clamp(pt.x + 20, 10, window.innerWidth - 320) + "px";
-    state.miniPanel.style.top = clamp(pt.y + 20, 10, window.innerHeight - 100) + "px";
-    document.body.appendChild(state.miniPanel);
+    miniPanel.style.left = clamp(centerX, 10, window.innerWidth - config.defaultWindowSize.width - 10) + "px";
+    miniPanel.style.top = clamp(centerY, 10, window.innerHeight - config.defaultWindowSize.height - 10) + "px";
 
-    // Закрытие при клике вне окна
-    setTimeout(() => {
-      document.addEventListener("mousedown", handleOutsideClick, { capture: true });
-    }, 100);
+    // Обработчики
+    header.addEventListener("mousedown", (e) => startDrag(e, miniPanel));
+    miniPanel.querySelectorAll(".aqp-resize").forEach(handle => {
+      handle.addEventListener("mousedown", (e) => startResize(e, miniPanel));
+    });
+
+    copyBtn.addEventListener("click", () => copyMini(miniPanel, copyBtn));
+    closeBtn.addEventListener("click", () => closeMini(miniPanel));
+
+    document.body.appendChild(miniPanel);
+    state.miniPanels.push(miniPanel);
+
+    // Закрытие всех окон при клике вне
+    if (state.miniPanels.length === 1) {
+      setTimeout(() => {
+        document.addEventListener("mousedown", handleOutsideClick, { capture: true });
+      }, 100);
+    }
   }
 
   function handleOutsideClick(e) {
-    if (!state.miniPanel) {
+    if (state.miniPanels.length === 0) {
       document.removeEventListener("mousedown", handleOutsideClick, { capture: true });
       return;
     }
 
-    // Если кликнули внутри miniPanel или bubble - не закрываем
-    if (state.miniPanel.contains(e.target) || (state.bubble && state.bubble.contains(e.target))) {
-      return;
-    }
+    // Проверяем, кликнули ли внутри хотя бы одного окна или bubble
+    const clickedInside = state.miniPanels.some(panel => panel.contains(e.target)) ||
+                          (state.bubble && state.bubble.contains(e.target));
 
-    // Закрываем окно
-    closeMini();
-    document.removeEventListener("mousedown", handleOutsideClick, { capture: true });
+    if (!clickedInside) {
+      closeAllMini();
+      document.removeEventListener("mousedown", handleOutsideClick, { capture: true });
+    }
   }
 
-  function startDrag(e) {
+  function startDrag(e, panel) {
     if (e.target.tagName === "BUTTON") return; // Не тащим, если кликнули на кнопку
 
     state.dragState = {
+      panel: panel,
       startX: e.clientX,
       startY: e.clientY,
-      panelLeft: parseInt(state.miniPanel.style.left) || 0,
-      panelTop: parseInt(state.miniPanel.style.top) || 0
+      panelLeft: parseInt(panel.style.left) || 0,
+      panelTop: parseInt(panel.style.top) || 0
     };
 
     document.addEventListener("mousemove", onDrag);
@@ -442,8 +473,8 @@
     const newLeft = state.dragState.panelLeft + dx;
     const newTop = state.dragState.panelTop + dy;
 
-    state.miniPanel.style.left = clamp(newLeft, 0, window.innerWidth - 300) + "px";
-    state.miniPanel.style.top = clamp(newTop, 0, window.innerHeight - 100) + "px";
+    state.dragState.panel.style.left = clamp(newLeft, 0, window.innerWidth - 300) + "px";
+    state.dragState.panel.style.top = clamp(newTop, 0, window.innerHeight - 100) + "px";
   }
 
   function stopDrag() {
@@ -452,12 +483,18 @@
     document.removeEventListener("mouseup", stopDrag);
   }
 
-  function startResize(e) {
+  function startResize(e, panel) {
+    const dir = e.target.dataset.dir;
+
     state.resizeState = {
+      panel: panel,
+      dir: dir,
       startX: e.clientX,
       startY: e.clientY,
-      startWidth: state.miniPanel.offsetWidth,
-      startHeight: state.miniPanel.offsetHeight
+      startWidth: panel.offsetWidth,
+      startHeight: panel.offsetHeight,
+      startLeft: parseInt(panel.style.left) || 0,
+      startTop: parseInt(panel.style.top) || 0
     };
 
     document.addEventListener("mousemove", onResize);
@@ -469,14 +506,33 @@
   function onResize(e) {
     if (!state.resizeState) return;
 
-    const dx = e.clientX - state.resizeState.startX;
-    const dy = e.clientY - state.resizeState.startY;
+    const { panel, dir, startX, startY, startWidth, startHeight, startLeft, startTop } = state.resizeState;
+    const dx = e.clientX - startX;
+    const dy = e.clientY - startY;
 
-    const newWidth = clamp(state.resizeState.startWidth + dx, 300, window.innerWidth * 0.9);
-    const newHeight = clamp(state.resizeState.startHeight + dy, 150, window.innerHeight * 0.9);
+    let newWidth = startWidth;
+    let newHeight = startHeight;
+    let newLeft = startLeft;
+    let newTop = startTop;
 
-    state.miniPanel.style.width = newWidth + "px";
-    state.miniPanel.style.height = newHeight + "px";
+    // Resize по направлениям
+    if (dir.includes("r")) newWidth = startWidth + dx;
+    if (dir.includes("l")) { newWidth = startWidth - dx; newLeft = startLeft + dx; }
+    if (dir.includes("b")) newHeight = startHeight + dy;
+    if (dir.includes("t")) { newHeight = startHeight - dy; newTop = startTop + dy; }
+
+    // Ограничиваем размеры
+    newWidth = clamp(newWidth, 300, window.innerWidth * 0.9);
+    newHeight = clamp(newHeight, 150, window.innerHeight * 0.9);
+
+    // Корректируем позицию при изменении с левой/верхней стороны
+    if (dir.includes("l")) newLeft = startLeft + (startWidth - newWidth);
+    if (dir.includes("t")) newTop = startTop + (startHeight - newHeight);
+
+    panel.style.width = newWidth + "px";
+    panel.style.height = newHeight + "px";
+    panel.style.left = newLeft + "px";
+    panel.style.top = newTop + "px";
   }
 
   function stopResize() {
@@ -485,25 +541,43 @@
     document.removeEventListener("mouseup", stopResize);
   }
 
-  function updateMini(text, replace) {
-    const body = document.getElementById("aqp-mini-body");
+  function updateMini(panel, text, replace) {
+    const body = panel.querySelector(".aqp-mini-body");
     if (body) body.textContent = replace ? text : body.textContent + text;
   }
 
-  function closeMini() {
-    if (state.miniPanel) {
-      state.miniPanel.remove();
-      state.miniPanel = null;
+  function closeMini(panel) {
+    panel.remove();
+    state.miniPanels = state.miniPanels.filter(p => p !== panel);
+
+    if (state.miniPanels.length === 0) {
       document.removeEventListener("mousedown", handleOutsideClick, { capture: true });
     }
   }
 
-  function copyMini() {
-    const body = document.getElementById("aqp-mini-body");
-    if (body?.textContent) GM_setClipboard(body.textContent);
+  function closeAllMini() {
+    state.miniPanels.forEach(panel => panel.remove());
+    state.miniPanels = [];
   }
 
-  function callAPI(model, prompt, extraParams, onDone, onError) {
+  function copyMini(panel, button) {
+    const body = panel.querySelector(".aqp-mini-body");
+    if (body?.textContent) {
+      GM_setClipboard(body.textContent);
+
+      // Анимация копирования
+      const originalText = button.textContent;
+      button.textContent = "✓ Скопировано!";
+      button.classList.add("copied");
+
+      setTimeout(() => {
+        button.textContent = originalText;
+        button.classList.remove("copied");
+      }, 1500);
+    }
+  }
+
+  function callAPI(model, prompt, extraParams, panel, onDone, onError) {
     if (state.requestInProgress) {
       onError("Предыдущий запрос ещё не завершён");
       return;
@@ -548,7 +622,7 @@
           if (state.retryCount < 2) {
             state.retryCount++;
             setTimeout(() => {
-              updateMini(`\n\n⏳ Повтор попытки ${state.retryCount}/3...`, false);
+              updateMini(panel, `\n\n⏳ Повтор попытки ${state.retryCount}/3...`, false);
               makeRequest();
             }, 1000 * state.retryCount);
           } else {
@@ -591,12 +665,16 @@
 
     openMini(tpl.name + " • " + model, "⏳ Отправка запроса...");
 
+    // Берём последнее созданное окно
+    const panel = state.miniPanels[state.miniPanels.length - 1];
+
     callAPI(
       model,
       prompt,
       extraParams,
-      (content) => updateMini(content, true),
-      (err) => updateMini("\n\n❌ " + err, false)
+      panel,
+      (content) => updateMini(panel, content, true),
+      (err) => updateMini(panel, "\n\n❌ " + err, false)
     );
   }
 
@@ -644,12 +722,22 @@
       ),
       el("div", { class: "aqp-row" },
         el("div", { class: "aqp-field", style: { flex: "1" } },
-          el("label", { class: "aqp-label" }, "Смещение X (px)"),
+          el("label", { class: "aqp-label" }, "Смещение панели X (px)"),
           el("input", { id: "f-offx", class: "aqp-input", type: "number", value: config.popupOffset.x })
         ),
         el("div", { class: "aqp-field", style: { flex: "1" } },
-          el("label", { class: "aqp-label" }, "Смещение Y (px)"),
+          el("label", { class: "aqp-label" }, "Смещение панели Y (px)"),
           el("input", { id: "f-offy", class: "aqp-input", type: "number", value: config.popupOffset.y })
+        )
+      ),
+      el("div", { class: "aqp-row" },
+        el("div", { class: "aqp-field", style: { flex: "1" } },
+          el("label", { class: "aqp-label" }, "Ширина окна (px)"),
+          el("input", { id: "f-winw", class: "aqp-input", type: "number", value: config.defaultWindowSize.width })
+        ),
+        el("div", { class: "aqp-field", style: { flex: "1" } },
+          el("label", { class: "aqp-label" }, "Высота окна (px)"),
+          el("input", { id: "f-winh", class: "aqp-input", type: "number", value: config.defaultWindowSize.height })
         )
       )
     ));
@@ -774,6 +862,10 @@
       config.popupOffset = {
         x: parseInt(document.getElementById("f-offx").value, 10) || 14,
         y: parseInt(document.getElementById("f-offy").value, 10) || 12
+      };
+      config.defaultWindowSize = {
+        width: clamp(parseInt(document.getElementById("f-winw").value, 10) || 600, 300, 2000),
+        height: clamp(parseInt(document.getElementById("f-winh").value, 10) || 400, 150, 2000)
       };
 
       saveConfig();
