@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI Selection → Poe API
 // @namespace    ai-quick-ask-poe
-// @version      2.2.0
+// @version      2.3.0
 // @description  Панель шаблонов с поддержкой всех возможностей Poe API
 // @author       you
 // @match        *://*/*
@@ -20,17 +20,16 @@
   "use strict";
 
   const CFG_KEY = "aqp_config_v2";
-  const CONFIG_VERSION = 3; // Увеличиваем при изменении структуры
+  const CONFIG_VERSION = 4; // Увеличиваем при изменении структуры
 
   const DEFAULTS = {
     version: CONFIG_VERSION,
     baseUrl: "https://api.poe.com/v1",
     defaultModel: "Claude-Sonnet-4",
     apiKey: "",
-    autoPopup: true,
     showModelSelector: false,
-    popupOffset: { x: 14, y: 12 },
-    defaultWindowSize: { width: 600, height: 400 },
+    popupOffset: { x: -45, y: 45 },
+    defaultWindowSize: { width: 400, height: 400 },
     templates: [
       {
         id: "what",
@@ -69,8 +68,7 @@
     "Grok-3",
     "Llama-3.1-405B",
     "Llama-3.3-70B",
-    "DeepSeek-R1",
-    "Qwen3-72B"
+    "DeepSeek-R1"
   ];
 
   // Цены моделей (USD за 1M токенов: input / output)
@@ -91,8 +89,7 @@
     "Grok-3": { in: 2.0, out: 10.0 },
     "Llama-3.1-405B": { in: 2.0, out: 2.0 },
     "Llama-3.3-70B": { in: 0.6, out: 0.6 },
-    "DeepSeek-R1": { in: 0.55, out: 2.19 },
-    "Qwen3-72B": { in: 0.4, out: 0.4 }
+    "DeepSeek-R1": { in: 0.55, out: 2.19 }
   };
 
   // Модели с поддержкой reasoning (по документации Poe)
@@ -104,7 +101,6 @@
     "Claude-Haiku-4.5",
     "DeepSeek-R1",
     "Gemini-2.5-Flash",
-    "Qwen3-72B",
     "Grok-3-mini"
   ];
 
@@ -126,11 +122,12 @@
   let state = {
     lastMouse: { x: 0, y: 0 },
     bubble: null,
-    miniPanels: [], // Массив окон вместо одного
+    miniPanels: [],
     requestInProgress: false,
     retryCount: 0,
     dragState: null,
-    resizeState: null
+    resizeState: null,
+    zIndexCounter: 2147483647 // Счётчик для z-index окон
   };
 
   function loadConfig() {
@@ -325,7 +322,6 @@
   }
 
   function showBubble() {
-    if (!config.autoPopup) return;
     hideBubble();
 
     const templates = config.templates || [];
@@ -358,8 +354,8 @@
     });
 
     const pt = getAnchorPoint();
-    const offX = config.popupOffset?.x ?? 14;
-    const offY = config.popupOffset?.y ?? 12;
+    const offX = config.popupOffset?.x ?? -45;
+    const offY = config.popupOffset?.y ?? 45;
     state.bubble.style.left = clamp(pt.x + offX, 10, window.innerWidth - 200) + "px";
     state.bubble.style.top = clamp(pt.y + offY, 10, window.innerHeight - 100) + "px";
     document.body.appendChild(state.bubble);
@@ -375,9 +371,11 @@
     if (state.bubble) { state.bubble.remove(); state.bubble = null; }
   }
 
-  function openMini(title, text) {
-    // НЕ закрываем предыдущие окна - накапливаем их
+  function bringToFront(panel) {
+    panel.style.zIndex = ++state.zIndexCounter;
+  }
 
+  function openMini(title, text) {
     const copyBtn = el("button", { class: "sec copy-btn" }, "Копировать");
     const closeBtn = el("button", { class: "sec" }, "Закрыть");
 
@@ -412,7 +410,10 @@
     miniPanel.style.left = clamp(centerX, 10, window.innerWidth - config.defaultWindowSize.width - 10) + "px";
     miniPanel.style.top = clamp(centerY, 10, window.innerHeight - config.defaultWindowSize.height - 10) + "px";
 
-    // Обработчики
+    // Устанавливаем z-index и добавляем обработчик для всплытия
+    bringToFront(miniPanel);
+    miniPanel.addEventListener("mousedown", () => bringToFront(miniPanel));
+
     header.addEventListener("mousedown", (e) => startDrag(e, miniPanel));
     miniPanel.querySelectorAll(".aqp-resize").forEach(handle => {
       handle.addEventListener("mousedown", (e) => startResize(e, miniPanel));
@@ -713,10 +714,6 @@
         })()
       ),
       el("label", { class: "aqp-checkbox" },
-        el("input", { id: "f-popup", type: "checkbox", checked: config.autoPopup }),
-        "Автопанель при выделении"
-      ),
-      el("label", { class: "aqp-checkbox" },
         el("input", { id: "f-showmodel", type: "checkbox", checked: config.showModelSelector }),
         "Показывать выбор модели в панели кнопок"
       ),
@@ -857,14 +854,13 @@
       config.baseUrl = document.getElementById("f-url").value.trim();
       config.apiKey = document.getElementById("f-key").value.trim();
       config.defaultModel = document.getElementById("f-model").value.trim();
-      config.autoPopup = document.getElementById("f-popup").checked;
       config.showModelSelector = document.getElementById("f-showmodel").checked;
       config.popupOffset = {
-        x: parseInt(document.getElementById("f-offx").value, 10) || 14,
-        y: parseInt(document.getElementById("f-offy").value, 10) || 12
+        x: parseInt(document.getElementById("f-offx").value, 10) || -45,
+        y: parseInt(document.getElementById("f-offy").value, 10) || 45
       };
       config.defaultWindowSize = {
-        width: clamp(parseInt(document.getElementById("f-winw").value, 10) || 600, 300, 2000),
+        width: clamp(parseInt(document.getElementById("f-winw").value, 10) || 400, 300, 2000),
         height: clamp(parseInt(document.getElementById("f-winh").value, 10) || 400, 150, 2000)
       };
 
