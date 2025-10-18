@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI Selection → Poe API
 // @namespace    ai-quick-ask-poe
-// @version      2.0.0
+// @version      2.1.0
 // @description  Панель шаблонов с поддержкой всех возможностей Poe API
 // @author       you
 // @match        *://*/*
@@ -20,8 +20,10 @@
   "use strict";
 
   const CFG_KEY = "aqp_config_v2";
+  const CONFIG_VERSION = 2; // Увеличиваем при изменении структуры шаблонов
 
   const DEFAULTS = {
+    version: CONFIG_VERSION,
     baseUrl: "https://api.poe.com/v1",
     defaultModel: "Claude-Sonnet-4",
     apiKey: "",
@@ -126,7 +128,8 @@
     miniPanel: null,
     requestInProgress: false,
     retryCount: 0,
-    dragState: null
+    dragState: null,
+    resizeState: null
   };
 
   function loadConfig() {
@@ -134,6 +137,15 @@
       const saved = GM_getValue(CFG_KEY);
       if (!saved) return JSON.parse(JSON.stringify(DEFAULTS));
       const parsed = JSON.parse(saved);
+
+      // Проверяем версию конфига
+      if (!parsed.version || parsed.version < CONFIG_VERSION) {
+        console.log("[Poe API] Обновление конфига до версии", CONFIG_VERSION);
+        // Обновляем только дефолтные шаблоны
+        parsed.templates = DEFAULTS.templates;
+        parsed.version = CONFIG_VERSION;
+      }
+
       // Мержим с дефолтами для обратной совместимости
       return {
         ...DEFAULTS,
@@ -147,6 +159,7 @@
   }
 
   function saveConfig() {
+    config.version = CONFIG_VERSION;
     GM_setValue(CFG_KEY, JSON.stringify(config));
   }
 
@@ -178,7 +191,7 @@
       // Разрешаем выделение в body окна ответа
       if (el.id === "aqp-mini-body") return false;
       // Блокируем только для bubble и других UI элементов
-      if (el.classList?.contains("aqp-bubble")) return true;
+      if (el.classList?.contains("aqp-bubble") || el.classList?.contains("aqp-mini")) return true;
       el = el.parentElement;
     }
     return false;
@@ -187,7 +200,7 @@
   // Улучшенные стили
   GM_addStyle(`
     .aqp-bubble {
-      position: fixed; z-index: 2147483646; background: #1a1a1a !important; color: #f0f0f0 !important;
+      position: fixed; z-index: 2147483648 !important; background: #1a1a1a !important; color: #f0f0f0 !important;
       padding: 8px 10px; border-radius: 10px; display: flex; gap: 6px; flex-wrap: wrap;
       box-shadow: 0 4px 16px rgba(0,0,0,.35) !important; font: 12px system-ui;
       border: 1px solid #333 !important;
@@ -199,20 +212,30 @@
     .aqp-bubble button:hover { background: #fff !important; }
 
     .aqp-mini {
-      position: fixed; z-index: 2147483647; min-width: 300px; max-width: 600px;
+      position: fixed; z-index: 2147483647; min-width: 300px; max-width: 90vw; min-height: 150px;
       background: #fff !important; border: 1px solid #ccc; border-radius: 10px;
       box-shadow: 0 8px 24px rgba(0,0,0,.25) !important; overflow: hidden;
+      display: flex; flex-direction: column;
     }
     .aqp-mini-header {
       display: flex; justify-content: space-between; align-items: center;
       padding: 10px 12px; background: #f5f5f5 !important; border-bottom: 1px solid #ddd;
       font: 600 13px system-ui; color: #1a1a1a !important; cursor: move;
-      user-select: none;
+      user-select: none; flex-shrink: 0;
     }
     .aqp-mini-body {
-      padding: 12px; max-height: 400px; overflow: auto;
+      padding: 12px; overflow: auto; flex: 1;
       white-space: pre-wrap; font: 13px/1.5 system-ui; color: #1a1a1a !important;
       user-select: text !important; cursor: text !important;
+    }
+    .aqp-mini-resize {
+      position: absolute; bottom: 0; right: 0; width: 20px; height: 20px;
+      cursor: nwse-resize; display: flex; align-items: flex-end; justify-content: flex-end;
+      padding: 2px; opacity: 0.5;
+    }
+    .aqp-mini-resize:hover { opacity: 1; }
+    .aqp-mini-resize::after {
+      content: '⋱'; font-size: 16px; color: #999; line-height: 1;
     }
     .aqp-mini button {
       background: #1a1a1a !important; color: #fff !important; border: none; padding: 5px 10px;
@@ -354,18 +377,45 @@
       )
     );
 
-    state.miniPanel = el("div", { class: "aqp-mini aqp-ui" },
+    const resizeHandle = el("div", { class: "aqp-mini-resize" });
+
+    state.miniPanel = el("div", { class: "aqp-mini aqp-ui", style: { width: "600px", height: "400px" } },
       header,
-      el("div", { class: "aqp-mini-body", id: "aqp-mini-body" }, text)
+      el("div", { class: "aqp-mini-body", id: "aqp-mini-body" }, text),
+      resizeHandle
     );
 
     // Добавляем drag & drop
     header.addEventListener("mousedown", startDrag);
 
+    // Добавляем resize
+    resizeHandle.addEventListener("mousedown", startResize);
+
     const pt = getAnchorPoint();
     state.miniPanel.style.left = clamp(pt.x + 20, 10, window.innerWidth - 320) + "px";
     state.miniPanel.style.top = clamp(pt.y + 20, 10, window.innerHeight - 100) + "px";
     document.body.appendChild(state.miniPanel);
+
+    // Закрытие при клике вне окна
+    setTimeout(() => {
+      document.addEventListener("mousedown", handleOutsideClick, { capture: true });
+    }, 100);
+  }
+
+  function handleOutsideClick(e) {
+    if (!state.miniPanel) {
+      document.removeEventListener("mousedown", handleOutsideClick, { capture: true });
+      return;
+    }
+
+    // Если кликнули внутри miniPanel или bubble - не закрываем
+    if (state.miniPanel.contains(e.target) || (state.bubble && state.bubble.contains(e.target))) {
+      return;
+    }
+
+    // Закрываем окно
+    closeMini();
+    document.removeEventListener("mousedown", handleOutsideClick, { capture: true });
   }
 
   function startDrag(e) {
@@ -402,13 +452,50 @@
     document.removeEventListener("mouseup", stopDrag);
   }
 
+  function startResize(e) {
+    state.resizeState = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startWidth: state.miniPanel.offsetWidth,
+      startHeight: state.miniPanel.offsetHeight
+    };
+
+    document.addEventListener("mousemove", onResize);
+    document.addEventListener("mouseup", stopResize);
+    e.preventDefault();
+    e.stopPropagation();
+  }
+
+  function onResize(e) {
+    if (!state.resizeState) return;
+
+    const dx = e.clientX - state.resizeState.startX;
+    const dy = e.clientY - state.resizeState.startY;
+
+    const newWidth = clamp(state.resizeState.startWidth + dx, 300, window.innerWidth * 0.9);
+    const newHeight = clamp(state.resizeState.startHeight + dy, 150, window.innerHeight * 0.9);
+
+    state.miniPanel.style.width = newWidth + "px";
+    state.miniPanel.style.height = newHeight + "px";
+  }
+
+  function stopResize() {
+    state.resizeState = null;
+    document.removeEventListener("mousemove", onResize);
+    document.removeEventListener("mouseup", stopResize);
+  }
+
   function updateMini(text, replace) {
     const body = document.getElementById("aqp-mini-body");
     if (body) body.textContent = replace ? text : body.textContent + text;
   }
 
   function closeMini() {
-    if (state.miniPanel) { state.miniPanel.remove(); state.miniPanel = null; }
+    if (state.miniPanel) {
+      state.miniPanel.remove();
+      state.miniPanel = null;
+      document.removeEventListener("mousedown", handleOutsideClick, { capture: true });
+    }
   }
 
   function copyMini() {
