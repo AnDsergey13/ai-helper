@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AI Selection → Poe API
 // @namespace    ai-quick-ask-poe
-// @version      2.5.0
+// @version      2.5.1
 // @description  Панель шаблонов с поддержкой всех возможностей Poe API
 // @author       you
 // @match        *://*/*
@@ -297,7 +297,7 @@
   // Улучшенные стили
   GM_addStyle(`
     .aqp-bubble {
-      position: fixed; z-index: ${MAX_Z_INDEX + 1} !important; background: #1a1a1a !important; color: #f0f0f0 !important;
+      position: fixed; z-index: 2147483648 !important; background: #1a1a1a !important; color: #f0f0f0 !important;
       padding: 8px 10px; border-radius: 10px; display: flex; gap: 6px; flex-wrap: wrap;
       box-shadow: 0 4px 16px rgba(0,0,0,.35) !important; font: 12px system-ui;
       border: 1px solid #333 !important; align-items: center;
@@ -356,7 +356,7 @@
 
     .aqp-modal {
       position: fixed; inset: 0; background: rgba(0,0,0,.6) !important;
-      z-index: ${MAX_Z_INDEX + 1}; display: flex; align-items: center; justify-content: center;
+      z-index: ${MAX_Z_INDEX}; display: flex; align-items: center; justify-content: center;
     }
     .aqp-box {
       background: #fff !important; border-radius: 10px; width: 750px; max-width: 95vw;
